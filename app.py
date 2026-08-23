@@ -175,7 +175,7 @@ with st.form("analysis-form"):
         years = st.selectbox("回看期間", [1, 3, 5, 10], index=2)
     with right:
         st.write("")
-        submitted = st.form_submit_button("開始分析", use_container_width=True)
+        submitted = st.form_submit_button("開始分析", width="stretch")
 
 tickers = normalize_tickers(ticker_input)
 api_key = get_secret("FMP_API_KEY")
@@ -243,7 +243,7 @@ if submitted or "has_run" not in st.session_state:
             hovermode="x unified",
             legend_orientation="h",
         )
-        st.plotly_chart(chart, use_container_width=True)
+        st.plotly_chart(chart, width="stretch")
     else:
         st.warning("查無可用的市場資料，請檢查股票代號後再試。")
 
@@ -269,7 +269,7 @@ if submitted or "has_run" not in st.session_state:
             summary.style.format(
                 {"最新價格": "{:,.2f}", "期間報酬": "{:+.1%}", "年化波動": "{:.1%}", "最大回撤": "{:.1%}", "最佳單日": "{:+.1%}", "最差單日": "{:+.1%}"}
             ),
-            use_container_width=True,
+            width="stretch",
         )
 
     st.subheader("財務比率")
@@ -282,7 +282,7 @@ if submitted or "has_run" not in st.session_state:
             tabs = st.tabs(list(ratio_groups))
             for tab, (label, ratio_frame) in zip(tabs, ratio_groups.items()):
                 with tab:
-                    st.dataframe(ratio_frame, use_container_width=True)
+                    st.dataframe(ratio_frame, width="stretch")
         except Exception as exc:
             st.warning("財務比率暫時無法載入；市場資料分析仍可正常使用。")
             with st.expander("技術資訊"):
