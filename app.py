@@ -137,6 +137,8 @@ if submitted or "has_run" not in st.session_state:
         try:
             item = ticker_history(history, ticker)
             close = find_column(item, "Adj Close", "Close")
+            if close.empty:
+                raise ValueError(f"{ticker} 沒有可用的價格資料")
             returns = close.pct_change().dropna()
             total_return = close.iloc[-1] / close.iloc[0] - 1 if len(close) > 1 else 0
             annual_volatility = returns.std() * (252**0.5) if len(returns) else 0
@@ -144,32 +146,35 @@ if submitted or "has_run" not in st.session_state:
             with metric_columns[index]:
                 st.metric(ticker, f"{close.iloc[-1]:,.2f}", f"期間報酬 {total_return:+.1%}")
                 st.caption(f"年化波動 {annual_volatility:.1%}")
-        except (KeyError, IndexError):
+        except (KeyError, IndexError, ValueError):
             with metric_columns[index]:
                 st.metric(ticker, "—")
                 st.caption("沒有足夠資料")
 
-    chart = go.Figure()
-    for ticker, item in histories.items():
-        close = find_column(item, "Adj Close", "Close")
-        normalized = close / close.iloc[0] * 100
-        chart_dates = (
-            normalized.index.to_timestamp()
-            if isinstance(normalized.index, pd.PeriodIndex)
-            else normalized.index
+    if histories:
+        chart = go.Figure()
+        for ticker, item in histories.items():
+            close = find_column(item, "Adj Close", "Close")
+            normalized = close / close.iloc[0] * 100
+            chart_dates = (
+                normalized.index.to_timestamp()
+                if isinstance(normalized.index, pd.PeriodIndex)
+                else normalized.index
+            )
+            chart.add_trace(go.Scatter(x=chart_dates, y=normalized, name=ticker, mode="lines"))
+        chart.update_layout(
+            height=430,
+            margin=dict(l=10, r=10, t=36, b=10),
+            paper_bgcolor="rgba(0,0,0,0)",
+            plot_bgcolor="white",
+            title="標準化價格走勢（起點 = 100）",
+            yaxis_title="指數化價格",
+            hovermode="x unified",
+            legend_orientation="h",
         )
-        chart.add_trace(go.Scatter(x=chart_dates, y=normalized, name=ticker, mode="lines"))
-    chart.update_layout(
-        height=430,
-        margin=dict(l=10, r=10, t=36, b=10),
-        paper_bgcolor="rgba(0,0,0,0)",
-        plot_bgcolor="white",
-        title="標準化價格走勢（起點 = 100）",
-        yaxis_title="指數化價格",
-        hovermode="x unified",
-        legend_orientation="h",
-    )
-    st.plotly_chart(chart, use_container_width=True)
+        st.plotly_chart(chart, use_container_width=True)
+    else:
+        st.warning("查無可用的市場資料，請檢查股票代號後再試。")
 
     st.subheader("報酬與風險")
     summary_rows = []
@@ -188,13 +193,14 @@ if submitted or "has_run" not in st.session_state:
                 "最差單日": returns.min(),
             }
         )
-    summary = pd.DataFrame(summary_rows).set_index("股票")
-    st.dataframe(
-        summary.style.format(
-            {"最新價格": "{:,.2f}", "期間報酬": "{:+.1%}", "年化波動": "{:.1%}", "最大回撤": "{:.1%}", "最佳單日": "{:+.1%}", "最差單日": "{:+.1%}"}
-        ),
-        use_container_width=True,
-    )
+    if summary_rows:
+        summary = pd.DataFrame(summary_rows).set_index("股票")
+        st.dataframe(
+            summary.style.format(
+                {"最新價格": "{:,.2f}", "期間報酬": "{:+.1%}", "年化波動": "{:.1%}", "最大回撤": "{:.1%}", "最佳單日": "{:+.1%}", "最差單日": "{:+.1%}"}
+            ),
+            use_container_width=True,
+        )
 
     st.subheader("財務比率")
     if not api_key:
