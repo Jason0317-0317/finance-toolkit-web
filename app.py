@@ -6,6 +6,7 @@ from datetime import date, timedelta
 import pandas as pd
 import plotly.graph_objects as go
 import streamlit as st
+import yfinance as yf
 from financetoolkit import Toolkit
 
 
@@ -58,6 +59,13 @@ def normalize_tickers(raw: str) -> list[str]:
     return list(dict.fromkeys(value.strip().upper() for value in values if value.strip()))[:5]
 
 
+def ticker_candidates(ticker: str) -> list[str]:
+    """Expand a plain four-digit Taiwan code without changing explicit symbols."""
+    if ticker.isdigit() and len(ticker) == 4:
+        return [f"{ticker}.TW", f"{ticker}.TWO"]
+    return [ticker]
+
+
 def ticker_history(frame: pd.DataFrame, ticker: str) -> pd.DataFrame:
     if not isinstance(frame.columns, pd.MultiIndex):
         return frame.copy()
@@ -76,14 +84,72 @@ def find_column(frame: pd.DataFrame, *names: str) -> pd.Series:
 
 
 @st.cache_data(ttl=3600, show_spinner=False)
-def load_market_data(tickers: tuple[str, ...], start_date: str, api_key: str) -> pd.DataFrame:
-    toolkit = Toolkit(
-        tickers=list(tickers),
-        api_key=api_key or None,
-        start_date=start_date,
-        benchmark_ticker="SPY",
-    )
-    return toolkit.get_historical_data()
+def load_market_data(
+    tickers: tuple[str, ...], start_date: str, api_key: str
+) -> dict[str, dict[str, object]]:
+    """Load each ticker independently so one bad symbol cannot break the batch."""
+    results: dict[str, dict[str, object]] = {}
+    for requested in tickers:
+        errors: list[str] = []
+        for candidate in ticker_candidates(requested):
+            close = pd.Series(dtype="float64")
+            source = "FinanceToolkit"
+            try:
+                toolkit = Toolkit(
+                    tickers=[candidate],
+                    api_key=api_key or None,
+                    start_date=start_date,
+                    benchmark_ticker=None,
+                )
+                frame = ticker_history(toolkit.get_historical_data(), candidate)
+                close = find_column(frame, "Adj Close", "Close")
+            except Exception as exc:
+                errors.append(f"FinanceToolkit {candidate}: {exc}")
+
+            close = clean_close(close)
+            if close.empty:
+                source = "Yahoo Finance"
+                try:
+                    frame = yf.download(
+                        candidate,
+                        start=start_date,
+                        auto_adjust=False,
+                        progress=False,
+                        threads=False,
+                        timeout=12,
+                    )
+                    if isinstance(frame.columns, pd.MultiIndex):
+                        frame = frame.droplevel(-1, axis=1)
+                    close = clean_close(find_column(frame, "Adj Close", "Close"))
+                except Exception as exc:
+                    errors.append(f"Yahoo Finance {candidate}: {exc}")
+
+            if len(close) >= 2:
+                results[requested] = {
+                    "resolved": candidate,
+                    "close": close,
+                    "source": source,
+                    "error": "",
+                }
+                break
+        else:
+            results[requested] = {
+                "resolved": requested,
+                "close": pd.Series(dtype="float64"),
+                "source": "",
+                "error": " | ".join(errors[-2:]),
+            }
+    return results
+
+
+def clean_close(series: pd.Series) -> pd.Series:
+    if series.empty:
+        return pd.Series(dtype="float64")
+    cleaned = pd.to_numeric(series, errors="coerce").replace([float("inf"), float("-inf")], pd.NA)
+    cleaned = cleaned.dropna()
+    cleaned = cleaned[cleaned > 0]
+    cleaned = cleaned[~cleaned.index.duplicated(keep="last")].sort_index()
+    return cleaned.astype("float64")
 
 
 @st.cache_data(ttl=21600, show_spinner=False)
@@ -123,7 +189,7 @@ if submitted or "has_run" not in st.session_state:
     start = (date.today() - timedelta(days=365 * years + 14)).isoformat()
     try:
         with st.spinner("正在取得公開市場資料並計算指標…"):
-            history = load_market_data(tuple(tickers), start, api_key)
+            market_data = load_market_data(tuple(tickers), start, api_key)
     except Exception as exc:
         st.error("目前無法取得資料。請確認股票代號，或稍後再試。")
         with st.expander("技術資訊"):
@@ -132,31 +198,34 @@ if submitted or "has_run" not in st.session_state:
 
     st.subheader("市場概覽")
     metric_columns = st.columns(min(len(tickers), 5))
-    histories: dict[str, pd.DataFrame] = {}
+    histories: dict[str, pd.Series] = {}
+    resolved_tickers: list[str] = []
     for index, ticker in enumerate(tickers):
         try:
-            item = ticker_history(history, ticker)
-            close = find_column(item, "Adj Close", "Close")
-            close = close[close > 0]
+            result = market_data[ticker]
+            close = result["close"]
+            if not isinstance(close, pd.Series):
+                raise TypeError("價格資料格式錯誤")
             if close.empty:
                 raise ValueError(f"{ticker} 沒有可用的價格資料")
             returns = close.pct_change().dropna()
             total_return = close.iloc[-1] / close.iloc[0] - 1 if len(close) > 1 else 0
             annual_volatility = returns.std() * (252**0.5) if len(returns) else 0
-            histories[ticker] = item
+            histories[ticker] = close
+            resolved = str(result["resolved"])
+            resolved_tickers.append(resolved)
             with metric_columns[index]:
                 st.metric(ticker, f"{close.iloc[-1]:,.2f}", f"期間報酬 {total_return:+.1%}")
-                st.caption(f"年化波動 {annual_volatility:.1%}")
-        except (KeyError, IndexError, ValueError):
+                suffix = f" · 查詢代號 {resolved}" if resolved != ticker else ""
+                st.caption(f"年化波動 {annual_volatility:.1%}{suffix}")
+        except (KeyError, IndexError, TypeError, ValueError):
             with metric_columns[index]:
                 st.metric(ticker, "—")
                 st.caption("沒有足夠資料")
 
     if histories:
         chart = go.Figure()
-        for ticker, item in histories.items():
-            close = find_column(item, "Adj Close", "Close")
-            close = close[close > 0]
+        for ticker, close in histories.items():
             normalized = close / close.iloc[0] * 100
             chart_dates = (
                 normalized.index.to_timestamp()
@@ -180,9 +249,7 @@ if submitted or "has_run" not in st.session_state:
 
     st.subheader("報酬與風險")
     summary_rows = []
-    for ticker, item in histories.items():
-        close = find_column(item, "Adj Close", "Close")
-        close = close[close > 0]
+    for ticker, close in histories.items():
         returns = close.pct_change().dropna()
         drawdown = close / close.cummax() - 1
         summary_rows.append(
@@ -211,7 +278,7 @@ if submitted or "has_run" not in st.session_state:
     else:
         try:
             with st.spinner("正在計算公開財報比率…"):
-                ratio_groups = load_ratios(tuple(tickers), start, api_key)
+                ratio_groups = load_ratios(tuple(resolved_tickers), start, api_key)
             tabs = st.tabs(list(ratio_groups))
             for tab, (label, ratio_frame) in zip(tabs, ratio_groups.items()):
                 with tab:
