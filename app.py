@@ -137,6 +137,7 @@ if submitted or "has_run" not in st.session_state:
         try:
             item = ticker_history(history, ticker)
             close = find_column(item, "Adj Close", "Close")
+            close = close[close > 0]
             if close.empty:
                 raise ValueError(f"{ticker} 沒有可用的價格資料")
             returns = close.pct_change().dropna()
@@ -155,6 +156,7 @@ if submitted or "has_run" not in st.session_state:
         chart = go.Figure()
         for ticker, item in histories.items():
             close = find_column(item, "Adj Close", "Close")
+            close = close[close > 0]
             normalized = close / close.iloc[0] * 100
             chart_dates = (
                 normalized.index.to_timestamp()
@@ -180,6 +182,7 @@ if submitted or "has_run" not in st.session_state:
     summary_rows = []
     for ticker, item in histories.items():
         close = find_column(item, "Adj Close", "Close")
+        close = close[close > 0]
         returns = close.pct_change().dropna()
         drawdown = close / close.cummax() - 1
         summary_rows.append(
